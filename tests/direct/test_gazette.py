@@ -343,6 +343,29 @@ def test_page_markup_is_reduced_to_readable_text(direct_vm, direct_deploy, direc
     assert contract.answer_of("q1") == "false"
 
 
+def test_hostile_markup_cannot_stall_resolution(direct_vm, direct_deploy, direct_alice):
+    """Regex stripping took 55s on 160 KB of unclosed <script tags and grew
+    quadratically, so one hostile source could time out every validator
+    and stall the question. The single-pass scanner must stay fast on a
+    full-size hostile page, and the other sources must still decide."""
+    import time
+
+    contract = direct_deploy(CONTRACT)
+    direct_vm.warp(T0)
+    _create(contract, direct_vm, direct_alice)
+    direct_vm.clear_mocks()
+    hostile = "<script " * 120000 + "<!-- " * 100000 + "a < " * 100000  # ~1.8 MB, nothing ever closed
+    direct_vm.mock_web(r"^https://a-news\.com/report$", {"status": 200, "body": hostile})
+    direct_vm.mock_llm(r"fetched from a-news\.com", _ans(True, True))
+    _setup_source(direct_vm, B, "page b", _ans(True, False))
+    _setup_source(direct_vm, C, "page c", _ans(True, False))
+
+    start = time.time()
+    _resolve_at(direct_vm, contract)
+    assert time.time() - start < 5
+    assert contract.answer_of("q1") == "false"
+
+
 def test_http_errors_do_not_vote(direct_vm, direct_deploy, direct_alice):
     contract = direct_deploy(CONTRACT)
     direct_vm.warp(T0)
@@ -479,6 +502,17 @@ def test_validator_rejects_a_leader_claiming_agreement_that_isnt_there(direct_vm
 def test_validator_rejects_a_leader_error(direct_vm, direct_deploy, direct_alice):
     _resolved_bool(direct_vm, direct_deploy, direct_alice)
     assert direct_vm.run_validator(leader_error=Exception("boom")) is False
+
+
+def test_validator_rejects_malformed_leader_results(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.warp(T0)
+    _create(contract, direct_vm, direct_alice, answer_type="number")
+    _sources(direct_vm, {A: _ans(True, 7), B: _ans(True, 7), C: _ans(True, 7)})
+    _resolve_at(direct_vm, contract)
+    for bad in ({"agree": 3}, {"answer": "seven", "agree": 3}, {"answer": "7000000", "agree": "lots"}, ["7000000", 3], "7000000"):
+        assert direct_vm.run_validator(leader_result=bad) is False
+    assert direct_vm.run_validator(leader_result={"answer": "7000000", "agree": 3}) is True
 
 
 def test_validator_number_tolerance(direct_vm, direct_deploy, direct_alice):

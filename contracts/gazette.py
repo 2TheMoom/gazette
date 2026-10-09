@@ -16,6 +16,7 @@ MAX_OPTION_LENGTH = 64
 MAX_URL_LENGTH = 512
 MAX_PAGE_CHARS = 12000
 MAX_HTML_BYTES = 2_000_000
+RAW_TEXT_TAGS = ("script", "style", "noscript", "svg", "template")
 REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -165,11 +166,46 @@ def _page_text(body: bytes) -> str:
     markup removed, entities decoded, whitespace collapsed. A plain fetch
     plus this is far lighter than a headless-browser render, which matters
     because every validator reads every source."""
-    t = body[:MAX_HTML_BYTES].decode("utf-8", errors="replace")
-    t = re.sub(r"(?is)<(script|style|noscript|svg|template)\b.*?</\1\s*>", " ", t)
-    t = re.sub(r"(?s)<!--.*?-->", " ", t)
-    t = re.sub(r"(?s)<[^>]*>", " ", t)
-    t = html.unescape(t)
+    s = body[:MAX_HTML_BYTES].decode("utf-8", errors="replace")
+    low = s.lower()
+    n = len(s)
+    out: list = []
+    i = 0
+    # One forward pass, never revisiting text: regex stripping backtracks
+    # quadratically on hostile markup (thousands of unclosed <script or
+    # <!-- tags), which would let one source time out every validator and
+    # stall the whole question. An unclosed tag ends the readable text.
+    while i < n:
+        j = s.find("<", i)
+        if j < 0:
+            out.append(s[i:])
+            break
+        out.append(s[i:j])
+        out.append(" ")
+        if low.startswith("<!--", j):
+            k = s.find("-->", j + 4)
+            if k < 0:
+                break
+            i = k + 3
+            continue
+        k = s.find(">", j + 1)
+        if k < 0:
+            break
+        raw = ""
+        for tag in RAW_TEXT_TAGS:
+            end = j + 1 + len(tag)
+            if low.startswith(tag, j + 1) and (end >= n or not low[end].isalnum()):
+                raw = tag
+                break
+        if raw:
+            close = low.find("</" + raw, k + 1)
+            if close < 0:
+                break
+            k = s.find(">", close)
+            if k < 0:
+                break
+        i = k + 1
+    t = html.unescape("".join(out))
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -384,16 +420,28 @@ class Gazette(gl.Contract):
             if not isinstance(leaders_res, gl.vm.Return):
                 return False
             leader = leaders_res.calldata
+            # A malformed leader result is rejected outright, never allowed
+            # to crash the check.
+            if not isinstance(leader, dict):
+                return False
+            try:
+                leader_agree = int(leader.get("agree", 0))
+                leader_answer = str(leader.get("answer", ""))
+            except (TypeError, ValueError):
+                return False
             mine = leader_fn()
-            leader_ok = int(leader.get("agree", 0)) >= threshold
+            leader_ok = leader_agree >= threshold
             mine_ok = mine["agree"] >= threshold
             if leader_ok != mine_ok:
                 return False  # a leader can't hide an answer, or invent one
             if not leader_ok:
                 return True  # both agree the sources don't settle it
             if answer_type == "number":
-                return _within(int(leader["answer"]), int(mine["answer"]), tol)
-            return leader["answer"] == mine["answer"]
+                try:
+                    return _within(int(leader_answer), int(mine["answer"]), tol)
+                except ValueError:
+                    return False
+            return leader_answer == mine["answer"]
 
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
         _bad(

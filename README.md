@@ -74,15 +74,21 @@ mutation-tested: deliberately broken, and confirmed caught by a test.
   only if the validator reaches the same outcome: the same answer (numbers
   within the question's tolerance), or the same "not settled". A leader
   can't invent an answer, claim agreement that isn't there, or hide an
-  answer the sources do give.
+  answer the sources do give. A malformed leader result is rejected
+  outright.
 
 **Input handling**
 - Source URLs must be `https://` with a strictly validated hostname: no
   credentials, ports, IP addresses, whitespace or quote characters, and at
   most 512 characters.
 - Pages are fetched as plain HTTP (no headless browser) and reduced to
-  text in the contract. Scripts, styles, comments and markup are removed,
-  and at most 12,000 characters reach the model. **Sources must be
+  text in the contract by a single forward pass. Scripts, styles,
+  comments and markup are removed, and at most 12,000 characters reach the
+  model. The pass is linear on purpose. Regex stripping (an earlier
+  version) took 55 seconds on 160 KB of unclosed `<script` tags and grew
+  quadratically, so one hostile source could have timed out every
+  validator and stalled the question. A 1.8 MB hostile page now processes
+  in milliseconds, and a regression test holds that line. **Sources must be
   server-rendered pages**: a page that only renders with JavaScript
   produces no text and simply doesn't vote.
 - The LLM's reply is parsed in the contract with `parse_float=str`, so
@@ -94,6 +100,10 @@ mutation-tested: deliberately broken, and confirmed caught by a test.
 - **Answers are only as good as the sources the creator chose.** Sources
   are public on-chain (`get_question`), so a consumer should only trust a
   question whose sources it would trust.
+- **The question's wording is part of what you trust.** The question text
+  is the model's instruction, so a creator could phrase one to steer the
+  model. Read the wording, not just the sources, before relying on a
+  question.
 - **The answer reflects the pages when `resolve` ran.** Pages that change
   later don't change a resolved answer, and a page changed before
   resolution changes what it says.
@@ -137,7 +147,7 @@ number as a fixed-point integer with 6 decimals (`"5250000"` is 5.25).
 ## Live deployment
 
 GenLayer Bradbury Testnet (chain 4221):
-[`0x0aC25230fa07b200BF38D71208D2772115C56C58`](https://explorer-bradbury.genlayer.com/address/0x0aC25230fa07b200BF38D71208D2772115C56C58)
+[`0x932be0c1Cbee9e1Cc27f34b037Bc2FfCf31d97B9`](https://explorer-bradbury.genlayer.com/address/0x932be0c1Cbee9e1Cc27f34b037Bc2FfCf31d97B9)
 
 Live questions use three sources run by three different organizations:
 ethereum.org, Wikipedia and Kraken.
@@ -145,13 +155,16 @@ ethereum.org, Wikipedia and Kraken.
 | Question | Type | Result |
 |---|---|---|
 | `eth-consensus`: Which consensus mechanism does the Ethereum network use today? | option | **Proof of Stake**, resolved (4 agree, 1 validator timed out) |
-| `eth-merge-year`: In what calendar year did Ethereum switch from proof-of-work to proof-of-stake? | number | **2022** (`2022000000`), resolved, 5/5 agree |
-| `eth-unstated`: What was the closing price of ETH in US dollars on October 8, 2026? | number | **Not settled**, stays open: no source states it, so nothing was guessed |
+| `eth-merge-year`: In what calendar year did Ethereum switch from proof-of-work to proof-of-stake? | number | **2022** (`2022000000`), resolved (4 agree, 1 validator timed out) |
+| `eth-unstated`: What was the closing price of ETH in US dollars on October 8, 2026? | number | **Not settled**, stays open: no source states it, so nothing was guessed. (One earlier round ended in a leader timeout, which also changed nothing.) |
 
-**One design change came from live testing.** The first deployment read
-pages with GenVM's headless-browser render, and three of five validators
-timed out reading three pages each. Switching to a plain fetch plus
-in-contract text extraction fixed it, and is the version deployed above.
+**Two changes came from testing against real conditions.** The first
+deployment read pages with GenVM's headless-browser render, and three of
+five validators timed out reading three pages each; a plain fetch plus
+in-contract text extraction fixed it. A later review found that the
+extraction's regexes could be stalled by hostile markup (see Input
+handling), so they were replaced with a linear scanner. The address above
+is that final version; all three questions were re-run on it.
 
 ## Development
 
